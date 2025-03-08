@@ -117,13 +117,11 @@ CCore::CCore()
     m_pfnMessageProcessor = NULL;
     m_pMessageBox = NULL;
 
-    m_bFirstFrame = true;
     m_bIsOfflineMod = false;
     m_bQuitOnPulse = false;
     m_bDestroyMessageBox = false;
     m_bCursorToggleControls = false;
     m_bLastFocused = true;
-    m_bWaitToSetNick = false;
     m_DiagnosticDebug = EDiagnosticDebug::NONE;
 
     // Create our Direct3DData handler.
@@ -136,7 +134,6 @@ CCore::CCore()
     m_pMouseControl = new CMouseControl();
 
     // Create our hook objects.
-    // m_pFileSystemHook           = new CFileSystemHook ( );
     m_pDirect3DHookManager = new CDirect3DHookManager();
     m_pDirectInputHookManager = new CDirectInputHookManager();
     m_pMessageLoopHook = new CMessageLoopHook();
@@ -152,7 +149,6 @@ CCore::CCore()
     m_bDoneFrameRateLimit = false;
     m_uiFrameRateLimit = 0;
     m_uiServerFrameRateLimit = 0;
-    m_uiNewNickWaitFrames = 0;
     m_iUnminimizeFrameCounter = 0;
     m_bDidRecreateRenderTargets = false;
     m_fMinStreamingMemory = 0;
@@ -210,7 +206,6 @@ CCore::~CCore()
 
     // Delete hooks.
     delete m_pSetCursorPosHook;
-    // delete m_pFileSystemHook;
     delete m_pDirect3DHookManager;
     delete m_pDirectInputHookManager;
 
@@ -517,7 +512,7 @@ void CCore::EnableChatInput(char* szCommand, DWORD dwColor)
 {
     if (m_pLocalGUI)
     {
-        if (m_pGame->GetSystemState() == 9 /* GS_PLAYING_GAME */ && m_pModManager->GetCurrentMod() != NULL && !IsOfflineMod() && !m_pGame->IsAtMenu() &&
+        if (m_pGame->GetSystemState() == 9 /* GS_PLAYING_GAME */ && m_pModManager->IsLoaded() && !IsOfflineMod() && !m_pGame->IsAtMenu() &&
             !m_pLocalGUI->GetMainMenu()->IsVisible() && !m_pLocalGUI->GetConsole()->IsVisible() && !m_pLocalGUI->IsChatBoxInputEnabled())
         {
             CChat* pChat = m_pLocalGUI->GetChat();
@@ -839,11 +834,7 @@ void CCore::ApplyHooks()
     // Create our hooks.
     m_pDirectInputHookManager->ApplyHook();
     // m_pDirect3DHookManager->ApplyHook ( );
-    // m_pFileSystemHook->ApplyHook ( );
     m_pSetCursorPosHook->ApplyHook();
-
-    // Redirect basic files.
-    // m_pFileSystemHook->RedirectFile ( "main.scm", "../../mta/gtafiles/main.scm" );
 
     // Remove useless DirectPlay dependency (dpnhpast.dll) @ 0x745701
     // We have to patch here as multiplayer_sa and game_sa are loaded too late
@@ -1155,8 +1146,12 @@ CWebCoreInterface* CCore::GetWebCore()
 {
     if (m_pWebCore == nullptr)
     {
+        bool gpuEnabled;
+        auto cvars = g_pCore->GetCVars();
+        cvars->Get("browser_enable_gpu", gpuEnabled);
+
         m_pWebCore = CreateModule<CWebCoreInterface>(m_WebCoreModule, "CefWeb", "cefweb", "InitWebCoreInterface", this);
-        m_pWebCore->Initialise();
+        m_pWebCore->Initialise(gpuEnabled);
     }
     return m_pWebCore;
 }
@@ -1235,82 +1230,53 @@ void CCore::DoPostFramePulse()
         m_pGUI->SelectInputHandlers(INPUT_CORE);
     }
 
-    if (m_pGame->GetSystemState() == 5)            // GS_INIT_ONCE
-    {
-        WatchDogCompletedSection("L2");            // gta_sa.set seems ok
-        WatchDogCompletedSection("L3");            // No hang on startup
-    }
-
     // This is the first frame in the menu?
     if (m_pGame->GetSystemState() == 7)            // GS_FRONTEND
     {
-        // Wait 250 frames more than the time it took to get status 7 (fade-out time)
-        static short WaitForMenu = 0;
+        if (m_menuFrame < 255)
+            ++m_menuFrame;
 
-        // Do crash dump encryption while the credit screen is displayed
-        if (WaitForMenu == 0)
+        if (m_menuFrame == 1)
+        {
+            WatchDogCompletedSection("L2");            // gta_sa.set seems ok
+            WatchDogCompletedSection("L3");            // No hang on startup
             HandleCrashDumpEncryption();
 
-        // Cope with early finish
-        if (m_pGame->HasCreditScreenFadedOut())
-            WaitForMenu = 250;
-
-        if (WaitForMenu >= 250)
-        {
-            if (m_bFirstFrame)
-            {
-                m_bFirstFrame = false;
-
-                // Disable vsync while it's all dark
-                m_pGame->DisableVSync();
-
-                // Parse the command line
-                // Does it begin with mtasa://?
-                if (m_szCommandLineArgs && strnicmp(m_szCommandLineArgs, "mtasa://", 8) == 0)
-                {
-                    SString strArguments = GetConnectCommandFromURI(m_szCommandLineArgs);
-                    // Run the connect command
-                    if (strArguments.length() > 0 && !m_pCommands->Execute(strArguments))
-                    {
-                        ShowMessageBox(_("Error") + _E("CC41"), _("Error executing URL"), MB_BUTTON_OK | MB_ICON_ERROR);
-                    }
-                }
-                else
-                {
-                    // We want to load a mod?
-                    const char* szOptionValue;
-                    if (szOptionValue = GetCommandLineOption("l"))
-                    {
-                        // Try to load the mod
-                        if (!m_pModManager->Load(szOptionValue, m_szCommandLineArgs))
-                        {
-                            SString strTemp(_("Error running mod specified in command line ('%s')"), szOptionValue);
-                            ShowMessageBox(_("Error") + _E("CC42"), strTemp, MB_BUTTON_OK | MB_ICON_ERROR);            // Command line Mod load failed
-                        }
-                    }
-                    // We want to connect to a server?
-                    else if (szOptionValue = GetCommandLineOption("c"))
-                    {
-                        CCommandFuncs::Connect(szOptionValue);
-                    }
-                }
-            }
-        }
-        else
-        {
-            WaitForMenu++;
+            // Disable vsync while it's all dark
+            m_pGame->DisableVSync();
         }
 
-        if (m_bWaitToSetNick && GetLocalGUI()->GetMainMenu()->IsVisible() && !GetLocalGUI()->GetMainMenu()->IsFading())
+        if (m_menuFrame >= 5 && !m_isNetworkReady && m_pNet->IsReady())
         {
-            if (m_uiNewNickWaitFrames > 75)
+            m_isNetworkReady = true;
+
+            // Parse the command line
+            // Does it begin with mtasa://?
+            if (m_szCommandLineArgs && strnicmp(m_szCommandLineArgs, "mtasa://", 8) == 0)
             {
-                // Request a new nickname if we're waiting for one
-                GetLocalGUI()->GetMainMenu()->GetSettingsWindow()->RequestNewNickname();
-                m_bWaitToSetNick = false;
+                SString strArguments = GetConnectCommandFromURI(m_szCommandLineArgs);
+                // Run the connect command
+                if (strArguments.length() > 0 && !m_pCommands->Execute(strArguments))
+                {
+                    ShowMessageBox(_("Error") + _E("CC41"), _("Error executing URL"), MB_BUTTON_OK | MB_ICON_ERROR);
+                }
             }
             else
-                m_uiNewNickWaitFrames++;
+            {
+                // We want to load a mod?
+                const char* szOptionValue;
+                if (szOptionValue = GetCommandLineOption("c"))
+                {
+                    CCommandFuncs::Connect(szOptionValue);
+                }
+            }
+        }
+
+        if (m_menuFrame >= 75 && m_requestNewNickname && GetLocalGUI()->GetMainMenu()->IsVisible() && !GetLocalGUI()->GetMainMenu()->IsFading())
+        {
+            // Request a new nickname if we're waiting for one
+            GetLocalGUI()->GetMainMenu()->GetSettingsWindow()->RequestNewNickname();
+            m_requestNewNickname = false;
         }
     }
 
@@ -2217,8 +2183,9 @@ void CCore::HandleIdlePulse()
         DoPreFramePulse();
         DoPostFramePulse();
     }
-    if (m_pModManager->GetCurrentMod())
-        m_pModManager->GetCurrentMod()->IdleHandler();
+
+    if (m_pModManager->IsLoaded())
+        m_pModManager->GetClient()->IdleHandler();
 }
 
 //
